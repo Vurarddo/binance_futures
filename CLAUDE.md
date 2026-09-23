@@ -84,6 +84,9 @@ developers.binance.com render client-side and cannot be fetched by tools; weight
   both **inclusive**. Response fields: symbol,
   fundingTime, fundingRate, markPrice (**empty string** in old records, e.g. 2020), rateType.
 - `fundingTime` is not always on the hour: e.g. `1790150400004` (+4 ms). Stored as reported.
+- Funding interval history since 2021-01-01: all universe symbols 8h, **except SOLUSDT
+  2022-11-09 20:00 → 4h, 2022-11-10 06:00 → 2h, back to 8h 2022-11-18 16:00** (FTX crash;
+  rate hit the 2% cap). So funding must be applied at stored timestamps, never on a fixed grid.
 - `fundingInfo` (2026-09-23): all 6 universe symbols have `fundingIntervalHours=8`. Caps/floors:
   BTC/ETH ±0.300%, SOL/BNB/XRP ±0.375%, DOGE ±0.4875%. Intervals can change over time —
   the quality report derives intervals from actual settlement timestamps.
@@ -117,7 +120,18 @@ developers.binance.com render client-side and cannot be fetched by tools; weight
 - Daily file for D is available on D+1 (2026-09-22 existed on 2026-09-23, 2026-09-23 did
   not). The monthly archive for the previous month existed by the 23rd; exact publish lag
   not measured.
-- Archive 1m bars equal REST 1m bars on the sampled windows (see `fut quality` rechecks).
+- Archive 1m bars equal REST 1m bars: 0 differences on 3 sampled days × 12 series
+  (51,840 bars) plus a live test on a recent BTCUSDT day.
+- **Monthly archives can silently omit whole days** that the daily archives and REST still
+  have (e.g. klines SOLUSDT/XRPUSDT 2022-02-26..28 and 2022-04-01..02; markPriceKlines for
+  all six symbols on several days in 2021-07, 2022-07/10, 2023-02, 2026-06). The checksum still
+  matches — the file is complete as published, just incomplete as data. `fut backfill` repairs
+  such days (daily archive first, then REST) and records each attempt in the manifest.
+- Genuine gaps (absent from archive *and* REST): markPriceKlines 2022-07-12 ~12:57–13:21 and
+  2024-08-12 10:02–10:03 (1–7 bars per symbol). Klines have none since 2021-01-01.
+- Klines contain **zero-volume bars in exchange-wide maintenance windows** (same dates across
+  all symbols, e.g. 2021-03-02 59 min, 2024-10-29 74 min; BTCUSDT 2023-11-10 99 min). The bars
+  exist but nothing traded — the backtester must treat them as non-tradable.
 - Also available (not used yet): `monthly/fundingRate/SYM/SYM-fundingRate-YYYY-MM.zip` with
   columns calc_time, funding_interval_hours, last_funding_rate.
 - Listing is possible via the S3 API
@@ -163,5 +177,5 @@ verified against the published example in binance-spot-api-docs (same scheme for
 
 Detailed entries live in `research/JOURNAL.md` (including failures). Summary:
 
-- 2026-09-23: Phase 1 data collected — see JOURNAL for coverage/quality numbers. No strategy
-  research yet.
+- 2026-09-23: Phase 1 data collected (6 symbols, 2021-01-01 → now, 1m klines + mark price,
+  funding). Klines 100% complete after repair; see JOURNAL for numbers. No strategy research yet.

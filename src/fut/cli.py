@@ -87,7 +87,7 @@ def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
     print(f"\nexchangeInfo snapshot: {rep.exchange_info_snapshot}")
     print(
         f"{'dataset':16} {'symbol':9} {'iv':3} {'monthly':>7} {'daily':>5} {'skip':>4} "
-        f"{'rest':>6} {'added':>9} {'revised':>7} {'missing':>7} errors"
+        f"{'rest':>6} {'added':>9} {'revised':>7} {'repaired':>8} {'missing':>7} errors"
     )
     for (ds, sym, iv), r in sorted(rep.series.items()):
         # Archives for the last ~2 days are routinely not published yet.
@@ -96,10 +96,13 @@ def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
         print(
             f"{ds.value:16} {sym:9} {iv:3} {r.monthly_files:>7} {r.daily_files:>5} "
             f"{r.skipped_months:>4} {r.rest_rows:>6} {r.rows_added:>9} {r.revised:>7} "
+            f"{r.repaired_days:>8} "
             f"{len(missing):>7} {len(r.errors)}"
         )
         for m in missing[:5]:
             print(f"    missing archive: {m}")
+        for d in r.unrepairable_days[:5]:
+            print(f"    unrepairable day (no data in archive or REST): {d}")
         for e in r.errors[:5]:
             print(f"    error: {e}")
     if rep.funding_added:

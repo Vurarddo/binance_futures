@@ -11,10 +11,11 @@ fetched incrementally from the last stored settlement.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from fut.domain.entities import Dataset, Source, SymbolSpec
 from fut.domain.time import (
@@ -33,6 +34,7 @@ from fut.ports.data import (
     IngestRecord,
     MarketData,
     PartitionKey,
+    PartitionManifest,
     daily_file_name,
 )
 
@@ -49,6 +51,8 @@ class BackfillRequest:
     rest_topup: bool = True
     # REST top-up is for the recent tail only; beyond this, rely on archives.
     max_rest_days: int = 7
+    # Fill whole days missing inside archived months (daily archive, then REST).
+    repair_gaps: bool = True
     workers: int = 4
 
 
@@ -60,6 +64,8 @@ class SeriesResult:
     rest_rows: int = 0
     rows_added: int = 0
     revised: int = 0
+    repaired_days: int = 0  # days completed by the gap repair
+    unrepairable_days: list[str] = field(default_factory=list)  # no data anywhere
     missing_files: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -84,7 +90,14 @@ class _MonthOutcome:
     skipped: bool = False
     added: int = 0
     revised: int = 0
+    repaired_days: int = 0
+    unrepairable: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+
+
+# Archives for the last couple of days may simply not be published yet; the REST top-up
+# covers that tail, so gap repair leaves it alone.
+ARCHIVE_LAG_DAYS = 2
 
 
 def _ingest_month(
@@ -92,6 +105,7 @@ def _ingest_month(
     today: date,
     onboard_day: date,
     archive: BulkArchive,
+    market: MarketData | None,
     store: HistoricalStore,
     clock: Clock,
 ) -> _MonthOutcome:
@@ -99,15 +113,30 @@ def _ingest_month(
     manifest = store.manifest(key)
     if any(r.source == Source.MONTHLY for r in manifest.ingested.values()):
         out.skipped = True
-        return out
-    if key.month.last_day < today:
-        bf = archive.monthly(key.dataset, key.symbol, key.interval, key.month)
-        if bf is not None:
-            rec = IngestRecord(bf.name, Source.MONTHLY, bf.sha256, len(bf.frame), clock.now_ms())
-            st = store.merge_partition(key, bf.frame, rec)
-            out.monthly, out.added, out.revised = 1, st.added, st.revised
-            log.info("%s %s %s %s: monthly %d rows", *_k(key), len(bf.frame))
-            return out
+    elif key.month.last_day < today and (
+        bf := archive.monthly(key.dataset, key.symbol, key.interval, key.month)
+    ):
+        rec = IngestRecord(bf.name, Source.MONTHLY, bf.sha256, len(bf.frame), clock.now_ms())
+        st = store.merge_partition(key, bf.frame, rec)
+        out.monthly, out.added, out.revised = 1, st.added, st.revised
+        log.info("%s %s %s %s: monthly %d rows", *_k(key), len(bf.frame))
+    else:
+        _ingest_dailies(key, today, onboard_day, archive, store, clock, manifest, out)
+    if market is not None:
+        _repair_gaps(key, today, onboard_day, archive, market, store, clock, out)
+    return out
+
+
+def _ingest_dailies(
+    key: PartitionKey,
+    today: date,
+    onboard_day: date,
+    archive: BulkArchive,
+    store: HistoricalStore,
+    clock: Clock,
+    manifest: PartitionManifest,
+    out: _MonthOutcome,
+) -> None:
     for day in key.month.days():
         if day >= today or day < onboard_day:
             continue
@@ -125,7 +154,60 @@ def _ingest_month(
         out.revised += st.revised
     if out.daily:
         log.info("%s %s %s %s: %d daily files", *_k(key), out.daily)
-    return out
+
+
+def _incomplete_days(key: PartitionKey, store: HistoricalStore, days: list[date]) -> list[date]:
+    step = interval_ms(key.interval)
+    per_day = DAY_MS // step
+    ot = store.read_klines(
+        key.dataset, key.symbol, key.interval, key.month.start_ms, key.month.end_ms
+    ).open_time
+    counts = Counter((ot // DAY_MS).tolist())
+    return [d for d in days if counts.get(date_to_ms(d) // DAY_MS, 0) < per_day]
+
+
+def _repair_gaps(
+    key: PartitionKey,
+    today: date,
+    onboard_day: date,
+    archive: BulkArchive,
+    market: MarketData,
+    store: HistoricalStore,
+    clock: Clock,
+    out: _MonthOutcome,
+) -> None:
+    """Monthly archives were observed to omit whole days that the daily archives and REST
+    still have (e.g. SOLUSDT 2022-02-26..28). Fill such days: daily archive first, then REST.
+    Every attempt is recorded in the manifest so it is not repeated on the next run."""
+    if DAY_MS % interval_ms(key.interval):
+        return  # only intervals that tile a day
+    cutoff = today - timedelta(days=ARCHIVE_LAG_DAYS)
+    days = [d for d in key.month.days() if onboard_day <= d < cutoff]
+    manifest = store.manifest(key)
+    if not any(r.source in (Source.MONTHLY, Source.DAILY) for r in manifest.ingested.values()):
+        return  # no archive for this month at all: report as missing, don't rebuild via REST
+    for day in _incomplete_days(key, store, days):
+        name = daily_file_name(key.symbol, key.interval, day)
+        if not manifest.has(name):
+            bf = archive.daily(key.dataset, key.symbol, key.interval, day)
+            if bf is not None:
+                rec = IngestRecord(bf.name, Source.DAILY, bf.sha256, len(bf.frame), clock.now_ms())
+                st = store.merge_partition(key, bf.frame, rec)
+                out.added += st.added
+                out.revised += st.revised
+        rest_name = f"repair-rest:{day.isoformat()}"
+        if _incomplete_days(key, store, [day]) and not manifest.has(rest_name):
+            start = date_to_ms(day)
+            frame = market.klines(key.dataset, key.symbol, key.interval, start, start + DAY_MS - 1)
+            rec = IngestRecord(rest_name, Source.REST, None, len(frame), clock.now_ms())
+            st = store.merge_partition(key, frame, rec)
+            out.added += st.added
+            out.revised += st.revised
+        if _incomplete_days(key, store, [day]):
+            out.unrepairable.append(f"{key.month}:{day.isoformat()}")
+        else:
+            out.repaired_days += 1
+            log.info("%s %s %s %s: repaired %s", *_k(key), day)
 
 
 def _k(key: PartitionKey) -> tuple[str, str, str, str]:
@@ -167,7 +249,16 @@ def run_backfill(
     done = 0
     with ThreadPoolExecutor(max_workers=max(1, req.workers)) as pool:
         futs = {
-            pool.submit(_ingest_month, key, today, first_day, archive, store, clock): key
+            pool.submit(
+                _ingest_month,
+                key,
+                today,
+                first_day,
+                archive,
+                market if req.repair_gaps else None,
+                store,
+                clock,
+            ): key
             for key, first_day in tasks
         }
         for fut in as_completed(futs):
@@ -186,6 +277,8 @@ def run_backfill(
             res.rows_added += o.added
             res.revised += o.revised
             res.missing_files.extend(o.missing)
+            res.repaired_days += o.repaired_days
+            res.unrepairable_days.extend(o.unrepairable)
             if done % 25 == 0 or done == len(tasks):
                 progress(f"bulk: {done}/{len(tasks)} partitions")
 

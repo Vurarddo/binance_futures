@@ -85,11 +85,16 @@ class FakeArchive:
     for days before `daily_until` (exclusive), except days in `missing_days`."""
 
     def __init__(
-        self, monthly_until: YearMonth, daily_until: date, missing_days: set[date] | None = None
+        self,
+        monthly_until: YearMonth,
+        daily_until: date,
+        missing_days: set[date] | None = None,
+        monthly_holes: set[date] | None = None,
     ) -> None:
         self.monthly_until = monthly_until
         self.daily_until = daily_until
         self.missing_days = missing_days or set()
+        self.monthly_holes = monthly_holes or set()  # days a monthly archive omits
         self.calls: list[str] = []
 
     def monthly(
@@ -99,11 +104,13 @@ class FakeArchive:
         if month >= self.monthly_until:
             return None
         n = (month.end_ms - month.start_ms) // MINUTE_MS
-        return BulkFile(
-            monthly_file_name(symbol, interval, month),
-            "0" * 64,
-            make_frame(month.start_ms, n, source=Source.MONTHLY),
-        )
+        frame = make_frame(month.start_ms, n, source=Source.MONTHLY)
+        keep = np.ones(n, dtype=bool)
+        for d in self.monthly_holes:
+            keep &= ~(
+                (frame.open_time >= date_to_ms(d)) & (frame.open_time < date_to_ms(d) + 86_400_000)
+            )
+        return BulkFile(monthly_file_name(symbol, interval, month), "0" * 64, frame.take(keep))
 
     def daily(self, dataset: Dataset, symbol: str, interval: str, day: date) -> BulkFile | None:
         self.calls.append(f"D {dataset.value} {symbol} {day}")
