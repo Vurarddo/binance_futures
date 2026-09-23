@@ -1,0 +1,68 @@
+[project]
+name = "fut"
+version = "0.1.0"
+description = "Research-first trading system for Binance USDⓈ-M perpetual futures"
+readme = "CLAUDE.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "duckdb>=1.1",
+    "httpx>=0.27",
+    "numpy>=2.0",
+    "pyarrow>=17",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+]
+
+[project.scripts]
+fut = "fut.cli:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+    "pytest>=8.3",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fut"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "S", "PT", "DTZ", "PL"]
+ignore = [
+    "PLR0913",  # many-args is fine for explicit config plumbing
+    "PLR0917",  # ditto for positional args in private helpers
+    "PLR0912",  # branchy CLI/orchestration code reads fine
+    "PLR2004",  # magic numbers are fine in data checks
+    "S101",     # assert is fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR", "DTZ", "PT018"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers -m 'not network'"
+markers = [
+    "network: hits real Binance endpoints (deselect with -m 'not network')",
+]

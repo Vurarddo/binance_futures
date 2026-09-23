@@ -1,0 +1,36 @@
+# All hooks are local: no hook code is downloaded from the network.
+repos:
+  - repo: local
+    hooks:
+      - id: secret-scan
+        name: secret scan
+        entry: uv run python scripts/secret_scan.py
+        language: system
+        types: [text]
+      - id: forbid-env
+        name: forbid committing .env files
+        entry: ".env files must never be committed"
+        language: fail
+        files: '(^|/)\.env($|\.(?!example$))'
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --check
+        language: system
+        types: [python]
+      - id: ruff
+        name: ruff lint
+        entry: uv run ruff check
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy --strict (src)
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        types: [python]
+      - id: pytest-fast
+        name: fast tests
+        entry: uv run pytest -q -m "not network" -x
+        language: system
+        pass_filenames: false
+        types: [python]
