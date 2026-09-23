@@ -95,7 +95,7 @@ developers.binance.com render client-side and cannot be fetched by tools; weight
   the still-open bar → we only store bars with open_time ≤ last closed bar.
 - Mark-price klines: volume/trade fields are 0; `trades` column holds a count of ~60.
 - `leverageBracket` and `commissionRate` are signed (USER_DATA); unsigned calls return -2014.
-  **Not yet verified** (no key configured).
+  Mainnet values **not yet verified** (only a testnet key is configured) — see testnet below.
 - Universe specs (mainnet, 2026-09-23):
 
   | symbol | tick | step | minNotional | maintMargin% (tier1) | liquidationFee | onboard (UTC) |
@@ -144,6 +144,25 @@ developers.binance.com render client-side and cannot be fetched by tools; weight
 - Testnet specs differ from mainnet: BTCUSDT step 0.0001 (mainnet 0.001), liquidationFee
   0.02 for all universe symbols (mainnet 0.0125–0.015). → Paper-trading parity must use the
   testnet's own filters; backtests must use mainnet's.
+- Signed requests work with the owner's testnet key (2026-09-23); local clock offset vs
+  server was +230 ms (we sync via `/fapi/v1/time`, recvWindow 5000).
+- `commissionRate` (testnet, 2026-09-23): maker 0.0200%, taker 0.0400% for all 6 universe
+  symbols; response also has `rpiCommissionRate` "0". Mainnet VIP0 not yet verified.
+- `leverageBracket` (testnet, 2026-09-23, 887 symbols): fields bracket, initialLeverage,
+  notionalCap, notionalFloor, maintMarginRatio, cum. Universe tier 1:
+
+  | symbol | tiers | max lev | tier-1 cap (USDT) | tier-1 MMR | last tier floor / MMR |
+  |---|---|---|---|---|---|
+  | BTCUSDT | 10 | 125 | 50,000 | 0.40% | 300M / 50% |
+  | ETHUSDT | 10 | 100 | 100,000 | 0.50% | 150M / 50% |
+  | SOLUSDT | 8 | 50 | 50,000 | 1.00% | 18M / 50% |
+  | BNBUSDT | 10 | 75 | 5,000 | 0.50% | 30M / 50% |
+  | XRPUSDT | 10 | 75 | 5,000 | 0.50% | 30M / 50% |
+  | DOGEUSDT | 9 | 50 | 5,000 | 0.60% | 18M / 50% |
+
+  Note: exchangeInfo `maintMarginPercent` (2.5%) is **not** the tier-1 MMR — use brackets.
+  Whether mainnet brackets equal testnet's is unverified; backtest liquidation modelling needs
+  the mainnet table (read-only mainnet key) or an explicit, documented assumption.
 
 **Signing**: HMAC-SHA256 over the exact query string, hex digest, `X-MBX-APIKEY` header;
 verified against the published example in binance-spot-api-docs (same scheme for futures).
